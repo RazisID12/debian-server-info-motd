@@ -23,6 +23,7 @@ readonly STATE_DIRECTORY="/var/lib/${PROJECT_ID}"
 
 readonly STEP_COUNT=4
 readonly STEP_DELAY="0.4"
+readonly DEBUG_LINE_DELAY="0.1"
 
 temporary_directory=""
 state_work_directory=""
@@ -31,6 +32,7 @@ mode_file=""
 changes_started=0
 step_active=0
 debug_mode=0
+debug_pacing=0
 
 case $# in
     0)
@@ -69,6 +71,10 @@ fi
 debug_log() {
     if ((debug_mode == 1)); then
         printf 'DEBUG: %s\n' "$*" >&2
+
+        if ((debug_pacing == 1)) && [[ -t 2 ]]; then
+            sleep "$DEBUG_LINE_DELAY"
+        fi
     fi
 }
 
@@ -86,6 +92,10 @@ begin_step() {
     local description=$2
 
     if ((debug_mode == 1)); then
+        if ((step_number > 1)); then
+            printf '\n' >&2
+        fi
+
         debug_log "$description"
         return 0
     fi
@@ -354,6 +364,10 @@ case "${answer,,}" in
         exit 0
         ;;
 esac
+
+if ((debug_mode == 1)); then
+    debug_pacing=1
+fi
 
 printf '\n'
 
