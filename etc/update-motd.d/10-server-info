@@ -3,7 +3,7 @@
 export PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export LC_ALL=C
 
-# Оставить пустым для автоматического определения.
+# Leave empty for automatic detection.
 PRIMARY_INTERFACE=""
 
 extract_route_device() {
