@@ -1,0 +1,351 @@
+#!/bin/bash
+
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export LC_ALL=C
+
+# Оставить пустым для автоматического определения.
+PRIMARY_INTERFACE=""
+
+extract_route_device() {
+    local route=$1
+    local previous=""
+    local token
+
+    for token in $route; do
+        if [[ $previous == "dev" ]]; then
+            printf '%s' "$token"
+            return 0
+        fi
+        previous=$token
+    done
+
+    return 1
+}
+
+join_values() {
+    local result=""
+    local value
+
+    for value in "$@"; do
+        if [[ -n $result ]]; then
+            result+=", "
+        fi
+        result+="$value"
+    done
+
+    printf '%s' "${result:-not configured}"
+}
+
+print_field() {
+    printf '  %-24s %s\n' "$1" "$2"
+}
+
+VERSION_ID="unknown"
+VERSION_CODENAME=""
+
+if [[ -r /etc/os-release ]]; then
+    . /etc/os-release
+fi
+
+hostname=$(< /proc/sys/kernel/hostname)
+
+kernel="unknown"
+architecture="unknown"
+read -r kernel architecture < <(uname -rm 2>/dev/null)
+
+os_text="Debian ${VERSION_ID}"
+
+if [[ -n $VERSION_CODENAME ]]; then
+    os_text+=" (${VERSION_CODENAME})"
+fi
+
+read -r uptime_raw _ < /proc/uptime
+uptime_seconds=${uptime_raw%%.*}
+
+if [[ ! $uptime_seconds =~ ^[0-9]+$ ]]; then
+    uptime_seconds=0
+fi
+
+uptime_days=$((uptime_seconds / 86400))
+uptime_hours=$(((uptime_seconds % 86400) / 3600))
+uptime_minutes=$(((uptime_seconds % 3600) / 60))
+
+uptime_parts=()
+
+if ((uptime_days > 0)); then
+    if ((uptime_days == 1)); then
+        uptime_parts+=("${uptime_days} day")
+    else
+        uptime_parts+=("${uptime_days} days")
+    fi
+fi
+
+if ((uptime_hours > 0)); then
+    if ((uptime_hours == 1)); then
+        uptime_parts+=("${uptime_hours} hour")
+    else
+        uptime_parts+=("${uptime_hours} hours")
+    fi
+fi
+
+if ((uptime_minutes > 0)); then
+    if ((uptime_minutes == 1)); then
+        uptime_parts+=("${uptime_minutes} minute")
+    else
+        uptime_parts+=("${uptime_minutes} minutes")
+    fi
+fi
+
+if ((${#uptime_parts[@]} == 0)); then
+    uptime_text="less than a minute"
+else
+    uptime_text=${uptime_parts[0]}
+
+    for ((index = 1; index < ${#uptime_parts[@]}; index++)); do
+        uptime_text+=", ${uptime_parts[index]}"
+    done
+fi
+
+if ! virtualization=$(systemd-detect-virt 2>/dev/null); then
+    virtualization="none"
+fi
+
+cpu_model=""
+
+while IFS=: read -r key value; do
+    key=${key//[[:space:]]/}
+
+    if [[ $key == "modelname" ]]; then
+        read -r cpu_model <<< "$value"
+        break
+    fi
+done < /proc/cpuinfo
+
+if [[ -z $cpu_model ]]; then
+    cpu_model=$(
+        lscpu 2>/dev/null |
+            awk -F: '
+                /^Model name:/ {
+                    sub(/^[[:space:]]+/, "", $2)
+                    print $2
+                    exit
+                }
+            '
+    )
+fi
+
+cpu_model=${cpu_model:-unknown}
+
+if [[ $virtualization != "none" ]]; then
+    virtual_cpus=$(nproc 2>/dev/null)
+
+    if [[ ! $virtual_cpus =~ ^[0-9]+$ ]]; then
+        virtual_cpus=1
+    fi
+
+    if ((virtual_cpus == 1)); then
+        cpu_text="${cpu_model} · ${virtual_cpus} vCPU"
+    else
+        cpu_text="${cpu_model} · ${virtual_cpus} vCPUs"
+    fi
+else
+    logical_cpus=0
+    physical_cores=0
+
+    read -r logical_cpus physical_cores < <(
+        lscpu --parse=CPU,SOCKET,CORE --online 2>/dev/null |
+            awk -F, '
+                !/^#/ && NF >= 3 {
+                    logical++
+                    core_id = $2 ":" $3
+                    cores[core_id] = 1
+                }
+
+                END {
+                    for (core_id in cores) {
+                        core_count++
+                    }
+
+                    print logical + 0, core_count + 0
+                }
+            '
+    )
+
+    if [[ ! $logical_cpus =~ ^[0-9]+$ ]] || ((logical_cpus == 0)); then
+        logical_cpus=$(nproc 2>/dev/null)
+    fi
+
+    if [[ ! $physical_cores =~ ^[0-9]+$ ]] || ((physical_cores == 0)); then
+        physical_cores=$logical_cpus
+    fi
+
+    core_word="cores"
+    thread_word="threads"
+
+    ((physical_cores == 1)) && core_word="core"
+    ((logical_cpus == 1)) && thread_word="thread"
+
+    cpu_text="${cpu_model} · ${physical_cores} ${core_word} / ${logical_cpus} ${thread_word}"
+fi
+
+read -r load_1 load_5 load_15 _ < /proc/loadavg
+load_text="${load_1} · ${load_5} · ${load_15} (1m · 5m · 15m)"
+
+mapfile -t memory_lines < <(
+    awk '
+        function tidy(number, text) {
+            text = sprintf("%.2f", number)
+            sub(/0+$/, "", text)
+            sub(/\.$/, "", text)
+            return text
+        }
+
+        /^MemTotal:/     { memory_total = $2 }
+        /^MemAvailable:/ { memory_available = $2 }
+        /^SwapTotal:/    { swap_total = $2 }
+        /^SwapFree:/     { swap_free = $2 }
+
+        END {
+            if (memory_total > 0) {
+                memory_used = memory_total - memory_available
+                memory_percent = int(memory_used * 100 / memory_total + 0.5)
+
+                printf "%s / %s GiB (%d%%)\n",
+                    tidy(memory_used / 1048576),
+                    tidy(memory_total / 1048576),
+                    memory_percent
+            } else {
+                print "unavailable"
+            }
+
+            if (swap_total > 0) {
+                swap_used = swap_total - swap_free
+                swap_percent = int(swap_used * 100 / swap_total + 0.5)
+
+                printf "%s / %s GiB (%d%%)\n",
+                    tidy(swap_used / 1048576),
+                    tidy(swap_total / 1048576),
+                    swap_percent
+            } else {
+                print "disabled"
+            }
+        }
+    ' /proc/meminfo
+)
+
+memory_text=${memory_lines[0]:-unavailable}
+swap_text=${memory_lines[1]:-unavailable}
+
+disk_text=$(
+    df -B1 --output=size,used,pcent / 2>/dev/null |
+        awk '
+            function tidy(number, text) {
+                text = sprintf("%.2f", number)
+                sub(/0+$/, "", text)
+                sub(/\.$/, "", text)
+                return text
+            }
+
+            NR == 2 {
+                printf "%s / %s GiB (%s)\n",
+                    tidy($2 / 1073741824),
+                    tidy($1 / 1073741824),
+                    $3
+            }
+        '
+)
+
+disk_text=${disk_text:-unavailable}
+
+primary_interface=$PRIMARY_INTERFACE
+
+if [[ -z $primary_interface ]]; then
+    ipv4_route=$(ip -4 route show default 2>/dev/null)
+    primary_interface=$(extract_route_device "$ipv4_route")
+fi
+
+if [[ -z $primary_interface ]]; then
+    ipv6_route=$(ip -6 route show default 2>/dev/null)
+    primary_interface=$(extract_route_device "$ipv6_route")
+fi
+
+if [[ -z $primary_interface ]]; then
+    while read -r _ device _ _; do
+        primary_interface=$device
+        break
+    done < <(ip -o -4 address show scope global 2>/dev/null)
+fi
+
+if [[ -z $primary_interface ]]; then
+    while read -r _ device _ _; do
+        primary_interface=$device
+        break
+    done < <(ip -o -6 address show scope global 2>/dev/null)
+fi
+
+ipv4_addresses=()
+ipv6_addresses=()
+
+if [[ -n $primary_interface ]]; then
+    while read -r _ _ _ address _; do
+        ipv4_addresses+=("${address%/*}")
+    done < <(
+        ip -o -4 address show dev "$primary_interface" scope global 2>/dev/null
+    )
+
+    while read -r _ _ _ address _; do
+        ipv6_addresses+=("${address%/*}")
+    done < <(
+        ip -o -6 address show dev "$primary_interface" scope global 2>/dev/null
+    )
+fi
+
+ipv4_text=$(join_values "${ipv4_addresses[@]}")
+ipv6_text=$(join_values "${ipv6_addresses[@]}")
+
+if [[ -n $primary_interface ]]; then
+    ipv4_label="IPv4 for ${primary_interface}:"
+    ipv6_label="IPv6 for ${primary_interface}:"
+else
+    ipv4_label="IPv4:"
+    ipv6_label="IPv6:"
+fi
+
+shopt -s nullglob
+process_directories=(/proc/[0-9]*)
+process_count=${#process_directories[@]}
+
+login_sessions=0
+
+while IFS= read -r session_line; do
+    if [[ -n $session_line ]]; then
+        ((login_sessions += 1))
+    fi
+done < <(who 2>/dev/null)
+
+timestamp=$(date '+%d.%m.%Y %H:%M %Z')
+
+printf 'Welcome to %s running %s\n\n' "$hostname" "$os_text"
+
+printf 'System information as of %s\n\n' "$timestamp"
+
+print_field "Kernel:" "${kernel}, ${architecture}"
+
+printf '\n'
+
+print_field "Uptime:" "$uptime_text"
+
+printf '\n'
+
+print_field "CPU:" "$cpu_text"
+print_field "Load average:" "$load_text"
+print_field "Memory:" "$memory_text"
+print_field "Swap:" "$swap_text"
+print_field "Disk (/):" "$disk_text"
+
+printf '\n'
+
+print_field "$ipv4_label" "$ipv4_text"
+print_field "$ipv6_label" "$ipv6_text"
+print_field "Processes:" "$process_count"
+print_field "Login sessions:" "$login_sessions"
