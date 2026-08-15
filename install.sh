@@ -41,6 +41,7 @@ actual_checksum=""
 installed_checksum=""
 installed_source_ref=""
 selected_action=""
+target_status="unknown"
 motd_directory_preexisted=1
 active_operation="Installation"
 operation_key="install"
@@ -328,6 +329,7 @@ validate_installed_state() {
     local current_checksum
     local current_mode
     local enabled_output
+    local expected_enabled_output=""
     local expected_disabled_mode
     local expected_disabled_value
     local extra_field
@@ -419,19 +421,26 @@ validate_installed_state() {
         fail "expected a directory: ${MOTD_DIRECTORY}"
     fi
 
-    if [[ -L $TARGET_FILE || ! -f $TARGET_FILE ]]; then
-        fail "installed MOTD script is missing or unsupported: ${TARGET_FILE}"
-    fi
+    target_status="valid"
 
-    if [[ $(stat -c '%U:%G:%a' -- "$TARGET_FILE") != "root:root:755" ]]; then
-        fail "unexpected ownership or mode on ${TARGET_FILE}"
-    fi
+    if [[ -L $TARGET_FILE ]]; then
+        fail "installed MOTD script is a symbolic link: ${TARGET_FILE}"
+    elif [[ ! -e $TARGET_FILE ]]; then
+        target_status="missing"
+    elif [[ ! -f $TARGET_FILE ]]; then
+        fail "installed MOTD script is not a regular file: ${TARGET_FILE}"
+    else
+        if [[ $(stat -c '%U:%G:%a' -- "$TARGET_FILE") != \
+            "root:root:755" ]]; then
+            fail "unexpected ownership or mode on ${TARGET_FILE}"
+        fi
 
-    current_checksum=$(sha256sum -- "$TARGET_FILE")
-    current_checksum=${current_checksum%% *}
+        current_checksum=$(sha256sum -- "$TARGET_FILE")
+        current_checksum=${current_checksum%% *}
 
-    if [[ $current_checksum != "$installed_checksum" ]]; then
-        fail "installed MOTD script was modified: ${TARGET_FILE}"
+        if [[ $current_checksum != "$installed_checksum" ]]; then
+            target_status="modified"
+        fi
     fi
 
     for state_path in "$MOTD_FILE" "$ISSUE_FILE"; do
@@ -487,13 +496,18 @@ validate_installed_state() {
         fail "cannot inspect ${MOTD_DIRECTORY}"
     fi
 
-    if [[ $enabled_output != "$TARGET_FILE" ]]; then
+    if [[ $target_status != "missing" ]]; then
+        expected_enabled_output=$TARGET_FILE
+    fi
+
+    if [[ $enabled_output != "$expected_enabled_output" ]]; then
         fail "unexpected enabled MOTD scripts were found"
     fi
 
     debug_log "Installation state format: ${state_format}"
     debug_log "Installed source reference: ${installed_source_ref}"
     debug_log "Installed payload SHA-256: ${installed_checksum}"
+    debug_log "Installed MOTD script status: ${target_status}"
     debug_log "Installed MOTD configuration: valid"
 }
 
@@ -701,6 +715,18 @@ prompt_installed_action() {
 }
 
 confirm_uninstallation() {
+    case $target_status in
+        missing)
+            printf '%sWarning:%s the installed MOTD script is missing.\n' \
+                "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
+            ;;
+        modified)
+            printf '%sWarning:%s the installed MOTD script was modified ' \
+                "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
+            printf 'and will be removed.\n' > /dev/tty
+            ;;
+    esac
+
     if ! {
         printf 'Uninstall %s and restore the previous MOTD? %s[y/N]%s ' \
             "$PROJECT_NAME" "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
@@ -719,9 +745,53 @@ confirm_uninstallation() {
     esac
 }
 
+confirm_update_repair() {
+    local question
+
+    case $target_status in
+        valid)
+            return 0
+            ;;
+        missing)
+            printf '%sWarning:%s the installed MOTD script is missing.\n' \
+                "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
+            question="Restore it from the repository?"
+            ;;
+        modified)
+            printf '%sWarning:%s the installed MOTD script was modified.\n' \
+                "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
+            question="Replace it with the repository version?"
+            ;;
+        *)
+            fail "unknown installed MOTD script status: ${target_status}"
+            ;;
+    esac
+
+    if ! {
+        printf '%s %s[y/N]%s ' \
+            "$question" "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
+        IFS= read -r answer < /dev/tty
+    }; then
+        fail "an interactive terminal is required"
+    fi
+
+    case "${answer,,}" in
+        y|yes)
+            return 0
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
 run_update() {
     local current_checksum
     local enabled_output
+    local installed_file_message
+    local install_step_description
+    local result_message
+    local verification_step_description
 
     active_operation="Update"
     operation_key="update"
@@ -731,11 +801,21 @@ run_update() {
     validate_installed_state
     complete_step
 
+    if ! confirm_update_repair; then
+        printf 'Update cancelled.\n'
+        return 0
+    fi
+
+    if [[ $target_status != "valid" ]]; then
+        printf '\n'
+    fi
+
     download_and_verify_payload 2 3
 
     begin_step 4 "Comparing versions..."
 
-    if [[ $actual_checksum == "$installed_checksum" ]]; then
+    if [[ $actual_checksum == "$installed_checksum" &&
+        $target_status == "valid" ]]; then
         debug_log "Installed version is already current"
         complete_step
 
@@ -746,14 +826,30 @@ run_update() {
         "$TARGET_FILE" >/dev/null
         complete_step
 
+        cleanup
         trap - ERR HUP INT TERM
         print_success "${PROJECT_NAME} is already up to date."
         return 0
     fi
 
-    debug_log "Update available: ${installed_checksum} -> ${actual_checksum}"
+    if [[ $actual_checksum != "$installed_checksum" ]]; then
+        debug_log \
+            "Update available: ${installed_checksum} -> ${actual_checksum}"
+        installed_file_message="Installed updated file"
+        install_step_description="Installing update..."
+        result_message="${PROJECT_NAME} was updated successfully."
+        verification_step_description="Verifying update..."
+    else
+        debug_log "Repair required: installed MOTD script is ${target_status}"
+        active_operation="Repair"
+        installed_file_message="Restored MOTD script"
+        install_step_description="Repairing installation..."
+        result_message="${PROJECT_NAME} was repaired successfully."
+        verification_step_description="Verifying repair..."
+    fi
+
     complete_step
-    begin_step 5 "Installing update..."
+    begin_step 5 "$install_step_description"
 
     rollback_directory="${temporary_directory}/rollback"
     install -d -m 0700 -- "$rollback_directory"
@@ -767,9 +863,9 @@ run_update() {
     mv -f -- "$target_temp_file" "$TARGET_FILE"
     target_temp_file=""
 
-    debug_log "Installed updated file: ${TARGET_FILE}"
+    debug_log "${installed_file_message}: ${TARGET_FILE}"
     complete_step
-    begin_step 6 "Verifying update..."
+    begin_step 6 "$verification_step_description"
 
     current_checksum=$(sha256sum -- "$TARGET_FILE")
     current_checksum=${current_checksum%% *}
@@ -820,8 +916,9 @@ run_update() {
     complete_step
 
     changes_started=0
+    cleanup
     trap - ERR HUP INT TERM
-    print_success "${PROJECT_NAME} was updated successfully."
+    print_success "$result_message"
 }
 
 run_uninstallation() {
@@ -839,6 +936,13 @@ run_uninstallation() {
     begin_step 1 "Validating installation..."
     validate_installed_state
     complete_step
+
+    if ! confirm_uninstallation; then
+        printf 'Uninstallation cancelled.\n'
+        return 0
+    fi
+
+    printf '\n'
     begin_step 2 "Restoring previous MOTD..."
 
     temporary_directory=$(mktemp -d "/tmp/${PROJECT_ID}.uninstall.XXXXXX")
@@ -943,6 +1047,7 @@ run_uninstallation() {
     preserve_temporary=0
     complete_step
 
+    cleanup
     trap - ERR HUP INT TERM
     print_success "${PROJECT_NAME} was uninstalled successfully."
 }
@@ -1004,11 +1109,6 @@ if [[ -e $STATE_DIRECTORY || -L $STATE_DIRECTORY ]]; then
             exit 0
             ;;
         uninstall)
-            if ! confirm_uninstallation; then
-                printf 'Uninstallation cancelled.\n'
-                exit 0
-            fi
-
             if ((debug_mode == 1)); then
                 debug_pacing=1
             fi
@@ -1187,6 +1287,7 @@ debug_log "Installation state saved: ${STATE_DIRECTORY}"
 
 changes_started=0
 state_work_directory=""
+cleanup
 trap - ERR HUP INT TERM
 print_success "${PROJECT_NAME} was installed successfully."
 printf 'Open a new SSH or local console session to see the MOTD.\n'
