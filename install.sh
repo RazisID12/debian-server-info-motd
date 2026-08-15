@@ -21,14 +21,66 @@ readonly MOTD_FILE="/etc/motd"
 readonly ISSUE_FILE="/etc/issue"
 readonly STATE_DIRECTORY="/var/lib/${PROJECT_ID}"
 
+readonly STEP_COUNT=4
+readonly STEP_DELAY="0.2"
+
 temporary_directory=""
 state_work_directory=""
 backup_directory=""
 mode_file=""
 changes_started=0
+step_active=0
+
+COLOR_RESET=""
+COLOR_BOLD=""
+COLOR_CYAN=""
+COLOR_GREEN=""
+COLOR_YELLOW=""
+COLOR_RED=""
+
+if [[ -t 1 && -t 2 && ${TERM:-dumb} != "dumb" && -z ${NO_COLOR:-} ]]; then
+    COLOR_RESET=$'\e[0m'
+    COLOR_BOLD=$'\e[1m'
+    COLOR_CYAN=$'\e[36m'
+    COLOR_GREEN=$'\e[32m'
+    COLOR_YELLOW=$'\e[33m'
+    COLOR_RED=$'\e[31m'
+fi
+
+print_header() {
+    printf '\n%s%s%s\n' "$COLOR_BOLD" "$PROJECT_NAME" "$COLOR_RESET"
+    printf '%s\n\n' '-----------------------'
+}
+
+begin_step() {
+    local step_number=$1
+    local description=$2
+
+    step_active=1
+    printf '%s[%s/%s]%s %-38s' \
+        "$COLOR_CYAN" "$step_number" "$STEP_COUNT" "$COLOR_RESET" \
+        "$description"
+}
+
+complete_step() {
+    if [[ -t 1 ]]; then
+        sleep "$STEP_DELAY"
+    fi
+
+    printf '%sdone%s\n' "$COLOR_GREEN" "$COLOR_RESET"
+    step_active=0
+}
+
+mark_step_failed() {
+    if ((step_active == 1)); then
+        printf '%sfailed%s\n' "$COLOR_RED" "$COLOR_RESET"
+        step_active=0
+    fi
+}
 
 fail() {
-    printf 'Error: %s\n' "$*" >&2
+    mark_step_failed
+    printf '%sError:%s %s\n' "$COLOR_RED" "$COLOR_RESET" "$*" >&2
     exit 1
 }
 
@@ -103,6 +155,7 @@ on_failure() {
 
     trap - ERR HUP INT TERM
     set +e
+    mark_step_failed
 
     if ((changes_started == 1)); then
         if rollback_installation; then
@@ -142,7 +195,7 @@ if [[ $ID != "debian" || $VERSION_ID != "13" ]]; then
     fail "this installer currently supports Debian 13 only"
 fi
 
-for command_name in wget sha256sum run-parts; do
+for command_name in wget sha256sum run-parts sleep; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         fail "required command not found: ${command_name}"
     fi
@@ -192,8 +245,11 @@ if [[ -d $MOTD_DIRECTORY ]]; then
     done <<< "$enabled_output"
 fi
 
+print_header
+
 if ! {
-    printf 'Install %s? [y/N] ' "$PROJECT_NAME" > /dev/tty
+    printf 'Install %s? %s[y/N]%s ' \
+        "$PROJECT_NAME" "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
     IFS= read -r answer < /dev/tty
 }; then
     fail "an interactive terminal is required"
@@ -207,6 +263,10 @@ case "${answer,,}" in
         exit 0
         ;;
 esac
+
+printf '\n'
+
+begin_step 1 "Downloading files..."
 
 temporary_directory=$(mktemp -d "/tmp/${PROJECT_ID}.XXXXXX")
 downloaded_script="${temporary_directory}/${PAYLOAD_PATH}"
@@ -225,6 +285,9 @@ if ! wget --quiet --https-only --timeout=30 --tries=3 \
     "${RAW_BASE_URL}/${CHECKSUM_PATH}"; then
     fail "could not download ${CHECKSUM_PATH}"
 fi
+
+complete_step
+begin_step 2 "Verifying SHA-256 checksum..."
 
 expected_checksum=$(
     awk -v path="$PAYLOAD_PATH" '
@@ -249,6 +312,9 @@ fi
 if ! bash -n "$downloaded_script"; then
     fail "downloaded MOTD script has invalid Bash syntax"
 fi
+
+complete_step
+begin_step 3 "Installing MOTD..."
 
 state_work_directory=$(mktemp -d "/var/lib/.${PROJECT_ID}.XXXXXX")
 backup_directory="${state_work_directory}/backup"
@@ -301,17 +367,24 @@ fi
 
 chmod 0755 -- "$TARGET_FILE"
 
+complete_step
+begin_step 4 "Verifying installation..."
+
 if ! enabled_output=$(run-parts --test --lsbsysinit "$MOTD_DIRECTORY"); then
+    mark_step_failed
     printf 'Could not verify the installed MOTD scripts.\n' >&2
     false
 fi
 
 if [[ $enabled_output != "$TARGET_FILE" ]]; then
+    mark_step_failed
     printf 'Unexpected enabled MOTD scripts were found.\n' >&2
     false
 fi
 
 "$TARGET_FILE" >/dev/null
+
+complete_step
 
 : > "${state_work_directory}/installed"
 mv -- "$state_work_directory" "$STATE_DIRECTORY"
@@ -320,5 +393,6 @@ changes_started=0
 state_work_directory=""
 trap - ERR HUP INT TERM
 
-printf '\n%s was installed successfully.\n' "$PROJECT_NAME"
+printf '\n%s[OK]%s %s was installed successfully.\n\n' \
+    "$COLOR_GREEN" "$COLOR_RESET" "$PROJECT_NAME"
 printf 'Open a new SSH or local console session to see the MOTD.\n'
