@@ -151,9 +151,30 @@ mark_step_failed() {
     fi
 }
 
+print_error() {
+    printf '%sError:%s %s\n' \
+        "$COLOR_RED" "$COLOR_RESET" "$*" >&2
+}
+
+print_warning() {
+    printf '%sWarning:%s %s\n' \
+        "$COLOR_YELLOW" "$COLOR_RESET" "$*" > /dev/tty
+}
+
+print_success() {
+    local message=$1
+
+    if ((debug_mode == 1)); then
+        printf '[OK] %s\n' "$message"
+    else
+        printf '\n%s[OK]%s %s\n\n' \
+            "$COLOR_GREEN" "$COLOR_RESET" "$message"
+    fi
+}
+
 fail() {
     mark_step_failed
-    printf '%sError:%s %s\n' "$COLOR_RED" "$COLOR_RESET" "$*" >&2
+    print_error "$*"
     exit 1
 }
 
@@ -669,17 +690,6 @@ on_failure() {
     exit "$exit_status"
 }
 
-print_success() {
-    local message=$1
-
-    if ((debug_mode == 1)); then
-        printf '%s\n' "$message"
-    else
-        printf '\n%s[OK]%s %s\n\n' \
-            "$COLOR_GREEN" "$COLOR_RESET" "$message"
-    fi
-}
-
 read_menu_choice() {
     local maximum=$1
     local default_choice=$2
@@ -726,11 +736,12 @@ confirm_yes_no() {
             fail "an interactive terminal is required"
         fi
 
+        # LC_ALL=C folds ASCII case only, so list Cyrillic forms explicitly.
         case "${answer,,}" in
-            y|yes)
+            y|yes|д|Д|да|Да|ДА)
                 return 0
                 ;;
-            ""|n|no)
+            ""|n|no|н|Н|нет|Нет|НЕТ)
                 return 1
                 ;;
             *)
@@ -783,13 +794,11 @@ prompt_installed_action() {
 confirm_uninstallation() {
     case $target_status in
         missing)
-            printf '%sWarning:%s the installed MOTD script is missing.\n' \
-                "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
+            print_warning "the installed MOTD script is missing."
             ;;
         modified)
-            printf '%sWarning:%s the installed MOTD script was modified ' \
-                "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
-            printf 'and will be removed.\n' > /dev/tty
+            print_warning \
+                "the installed MOTD script was modified and will be removed."
             ;;
     esac
 
@@ -805,13 +814,11 @@ confirm_update_repair() {
             return 0
             ;;
         missing)
-            printf '%sWarning:%s the installed MOTD script is missing.\n' \
-                "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
+            print_warning "the installed MOTD script is missing."
             question="Restore it from the repository?"
             ;;
         modified)
-            printf '%sWarning:%s the installed MOTD script was modified.\n' \
-                "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
+            print_warning "the installed MOTD script was modified."
             question="Replace it with the repository version?"
             ;;
         *)
@@ -843,7 +850,7 @@ run_update() {
         return 0
     fi
 
-    if [[ $target_status != "valid" ]]; then
+    if [[ $target_status != "valid" ]] && ((debug_mode == 0)); then
         printf '\n'
     fi
 
@@ -909,19 +916,20 @@ run_update() {
 
     if [[ $current_checksum != "$actual_checksum" ]]; then
         mark_step_failed
-        printf 'Updated MOTD checksum verification failed.\n' >&2
+        print_error "updated MOTD checksum verification failed"
         false
     fi
 
     if ! enabled_output=$(run-parts --test --lsbsysinit "$MOTD_DIRECTORY"); then
         mark_step_failed
-        printf 'Could not verify the updated MOTD scripts.\n' >&2
+        print_error "could not verify the updated MOTD scripts"
         false
     fi
 
     if [[ $enabled_output != "$TARGET_FILE" ]]; then
         mark_step_failed
-        printf 'Unexpected enabled MOTD scripts were found after update.\n' >&2
+        print_error \
+            "unexpected enabled MOTD scripts were found after update"
         false
     fi
 
@@ -945,7 +953,7 @@ run_update() {
     if [[ $(< "${STATE_DIRECTORY}/payload.sha256") != "$actual_checksum" ||
         $(< "${STATE_DIRECTORY}/source-ref") != "$SOURCE_REF" ]]; then
         mark_step_failed
-        printf 'Could not verify the updated installation state.\n' >&2
+        print_error "could not verify the updated installation state"
         false
     fi
 
@@ -979,7 +987,10 @@ run_uninstallation() {
         return 0
     fi
 
-    printf '\n'
+    if ((debug_mode == 0)); then
+        printf '\n'
+    fi
+
     begin_step 2 "Restoring previous MOTD..."
 
     temporary_directory=$(mktemp -d "/tmp/${PROJECT_ID}.uninstall.XXXXXX")
@@ -1029,14 +1040,14 @@ run_uninstallation() {
 
     if [[ -e $TARGET_FILE || -L $TARGET_FILE ]]; then
         mark_step_failed
-        printf 'Installed MOTD script still exists after removal.\n' >&2
+        print_error "installed MOTD script still exists after removal"
         false
     fi
 
     if ! verify_restored_file "$MOTD_FILE" "motd" ||
         ! verify_restored_file "$ISSUE_FILE" "issue"; then
         mark_step_failed
-        printf 'Previous MOTD files were not restored correctly.\n' >&2
+        print_error "previous MOTD files were not restored correctly"
         false
     fi
 
@@ -1052,18 +1063,19 @@ run_uninstallation() {
         if ! enabled_output=$(run-parts --test --lsbsysinit \
             "$MOTD_DIRECTORY"); then
             mark_step_failed
-            printf 'Could not verify the restored MOTD scripts.\n' >&2
+            print_error "could not verify the restored MOTD scripts"
             false
         fi
 
         if [[ $enabled_output != "$expected_enabled_output" ]]; then
             mark_step_failed
-            printf 'Unexpected enabled MOTD scripts were found after removal.\n' >&2
+            print_error \
+                "unexpected enabled MOTD scripts were found after removal"
             false
         fi
     elif [[ -e $MOTD_DIRECTORY || -L $MOTD_DIRECTORY ]]; then
         mark_step_failed
-        printf 'Installer-created MOTD directory still exists.\n' >&2
+        print_error "installer-created MOTD directory still exists"
         false
     fi
 
@@ -1075,7 +1087,8 @@ run_uninstallation() {
 
     if ! rm -rf -- "$STATE_DIRECTORY"; then
         mark_step_failed
-        printf 'MOTD was removed, but installation state cleanup failed.\n' >&2
+        print_error \
+            "MOTD was removed, but installation state cleanup failed"
         printf 'Recovery data was kept in: %s\n' \
             "$temporary_directory" >&2
         exit 1
@@ -1292,7 +1305,7 @@ begin_step 4 "Verifying installation..."
 
 if ! enabled_output=$(run-parts --test --lsbsysinit "$MOTD_DIRECTORY"); then
     mark_step_failed
-    printf 'Could not verify the installed MOTD scripts.\n' >&2
+    print_error "could not verify the installed MOTD scripts"
     false
 fi
 
@@ -1300,7 +1313,7 @@ debug_log "Enabled after installation: ${enabled_output:-none}"
 
 if [[ $enabled_output != "$TARGET_FILE" ]]; then
     mark_step_failed
-    printf 'Unexpected enabled MOTD scripts were found.\n' >&2
+    print_error "unexpected enabled MOTD scripts were found"
     false
 fi
 
