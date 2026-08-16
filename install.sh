@@ -41,6 +41,7 @@ actual_checksum=""
 installed_checksum=""
 installed_source_ref=""
 selected_action=""
+menu_choice=""
 target_status="unknown"
 motd_directory_preexisted=1
 active_operation="Installation"
@@ -679,39 +680,104 @@ print_success() {
     fi
 }
 
-prompt_installed_action() {
-    print_header
-    printf 'Status: installed\n\n'
-    printf '  [1] Update\n'
-    printf '  [2] Uninstall\n'
-    printf '  [3] Cancel\n\n'
+read_menu_choice() {
+    local maximum=$1
+    local default_choice=$2
+    local answer
 
     while true; do
         if ! {
-            printf 'Select an action [1-3]: ' > /dev/tty
+            printf 'Select an action [1-%s, default: %s]: ' \
+                "$maximum" "$default_choice" > /dev/tty
+            IFS= read -r answer < /dev/tty
+        }; then
+            fail "an interactive terminal is required"
+        fi
+
+        if [[ -z $answer ]]; then
+            menu_choice=$default_choice
+            return 0
+        fi
+
+        case $answer in
+            1|2|3)
+                if ((answer <= maximum)); then
+                    menu_choice=$answer
+                    return 0
+                fi
+                ;;
+        esac
+
+        printf 'Please select a number from 1 to %s.\n' \
+            "$maximum" > /dev/tty
+    done
+}
+
+confirm_yes_no() {
+    local question=$1
+    local answer
+
+    while true; do
+        if ! {
+            printf '%s %s[y/N]%s ' \
+                "$question" "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
             IFS= read -r answer < /dev/tty
         }; then
             fail "an interactive terminal is required"
         fi
 
         case "${answer,,}" in
-            1|update)
-                selected_action="update"
+            y|yes)
                 return 0
                 ;;
-            2|uninstall)
-                selected_action="uninstall"
-                return 0
-                ;;
-            3|cancel)
-                selected_action="cancel"
-                return 0
+            ""|n|no)
+                return 1
                 ;;
             *)
-                printf 'Please select 1, 2, or 3.\n' > /dev/tty
+                printf 'Please answer y or n.\n' > /dev/tty
                 ;;
         esac
     done
+}
+
+prompt_install_action() {
+    print_header
+    printf 'Status: not installed\n\n'
+    printf '  1) Install\n'
+    printf '  2) Cancel\n\n'
+
+    read_menu_choice 2 2
+
+    case $menu_choice in
+        1)
+            selected_action="install"
+            ;;
+        2)
+            selected_action="cancel"
+            ;;
+    esac
+}
+
+prompt_installed_action() {
+    print_header
+    printf 'Status: installed\n\n'
+    printf '  1) Update\n'
+    printf '  2) Uninstall\n'
+    printf '  3) Cancel\n\n'
+
+    read_menu_choice 3 3
+
+    case $menu_choice in
+        1)
+            selected_action="update"
+            ;;
+        2)
+            selected_action="uninstall"
+            ;;
+        3)
+            selected_action="cancel"
+            ;;
+    esac
 }
 
 confirm_uninstallation() {
@@ -727,22 +793,8 @@ confirm_uninstallation() {
             ;;
     esac
 
-    if ! {
-        printf 'Uninstall %s and restore the previous MOTD? %s[y/N]%s ' \
-            "$PROJECT_NAME" "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
-        IFS= read -r answer < /dev/tty
-    }; then
-        fail "an interactive terminal is required"
-    fi
-
-    case "${answer,,}" in
-        y|yes)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    confirm_yes_no \
+        "Uninstall ${PROJECT_NAME} and restore the previous MOTD?"
 }
 
 confirm_update_repair() {
@@ -767,22 +819,7 @@ confirm_update_repair() {
             ;;
     esac
 
-    if ! {
-        printf '%s %s[y/N]%s ' \
-            "$question" "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
-        IFS= read -r answer < /dev/tty
-    }; then
-        fail "an interactive terminal is required"
-    fi
-
-    case "${answer,,}" in
-        y|yes)
-            return 0
-            ;;
-        *)
-            return 1
-            ;;
-    esac
+    confirm_yes_no "$question"
 }
 
 run_update() {
@@ -802,7 +839,7 @@ run_update() {
     complete_step
 
     if ! confirm_update_repair; then
-        printf 'Update cancelled.\n'
+        printf 'No changes were made.\n'
         return 0
     fi
 
@@ -938,7 +975,7 @@ run_uninstallation() {
     complete_step
 
     if ! confirm_uninstallation; then
-        printf 'Uninstallation cancelled.\n'
+        printf 'No changes were made.\n'
         return 0
     fi
 
@@ -1169,21 +1206,13 @@ else
     done
 fi
 
-print_header
+prompt_install_action
 
-if ! {
-    printf 'Install %s? %s[y/N]%s ' \
-        "$PROJECT_NAME" "$COLOR_YELLOW" "$COLOR_RESET" > /dev/tty
-    IFS= read -r answer < /dev/tty
-}; then
-    fail "an interactive terminal is required"
-fi
-
-case "${answer,,}" in
-    y|yes)
+case $selected_action in
+    install)
         ;;
-    *)
-        printf 'Installation cancelled.\n'
+    cancel)
+        printf 'No changes were made.\n'
         exit 0
         ;;
 esac
