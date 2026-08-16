@@ -5,6 +5,38 @@ export LC_ALL=C
 
 readonly FIELD_WIDTH=24
 
+print_usage() {
+    local program_name=${0##*/}
+
+    printf 'Usage: %s [--manual]\n\n' "$program_name"
+    printf 'Options:\n'
+    printf '  --manual    Show system information without a welcome message\n'
+    printf '  -h, --help  Show this help message\n'
+}
+
+parse_arguments() {
+    output_mode="motd"
+
+    while (($# > 0)); do
+        case $1 in
+            --manual)
+                output_mode="manual"
+                ;;
+            -h | --help)
+                output_mode="help"
+                return 0
+                ;;
+            *)
+                printf 'Error: unknown argument: %s\n\n' "$1" >&2
+                print_usage >&2
+                return 2
+                ;;
+        esac
+
+        shift
+    done
+}
+
 extract_route_device() {
     local route=$1
     local previous=""
@@ -103,6 +135,86 @@ collect_system_info() {
     timestamp=${timestamp:-unknown}
 }
 
+format_virtualization_name() {
+    local virtualization_id=$1
+
+    case $virtualization_id in
+        qemu) printf 'QEMU' ;;
+        kvm) printf 'KVM' ;;
+        amazon) printf 'Amazon EC2 Nitro' ;;
+        zvm) printf 'IBM z/VM' ;;
+        vmware) printf 'VMware' ;;
+        microsoft) printf 'Microsoft Hyper-V' ;;
+        oracle) printf 'Oracle VirtualBox' ;;
+        powervm) printf 'IBM PowerVM' ;;
+        xen) printf 'Xen' ;;
+        bochs) printf 'Bochs' ;;
+        uml) printf 'User-mode Linux' ;;
+        parallels) printf 'Parallels' ;;
+        bhyve) printf 'bhyve' ;;
+        qnx) printf 'QNX' ;;
+        acrn) printf 'ACRN' ;;
+        apple) printf 'Apple Virtualization' ;;
+        sre) printf 'LMHS SRE' ;;
+        google) printf 'Google Compute Engine' ;;
+        openvz) printf 'OpenVZ/Virtuozzo' ;;
+        lxc) printf 'LXC' ;;
+        lxc-libvirt) printf 'LXC/libvirt' ;;
+        systemd-nspawn) printf 'systemd-nspawn' ;;
+        docker) printf 'Docker' ;;
+        podman) printf 'Podman' ;;
+        rkt) printf 'rkt' ;;
+        wsl) printf 'WSL' ;;
+        proot) printf 'proot' ;;
+        pouch) printf 'Pouch' ;;
+        *) printf '%s' "$virtualization_id" ;;
+    esac
+}
+
+collect_virtualization_info() {
+    local virtualization_name=""
+
+    virtualization="unknown"
+    virtualization_kind="unknown"
+    system_type_text="unavailable"
+
+    if ! command -v systemd-detect-virt >/dev/null 2>&1; then
+        return 0
+    fi
+
+    if virtualization=$(systemd-detect-virt 2>/dev/null); then
+        :
+    elif [[ $virtualization == "none" ]]; then
+        virtualization_kind="physical"
+        system_type_text="Physical machine"
+        return 0
+    else
+        virtualization="unknown"
+        return 0
+    fi
+
+    if [[ ! $virtualization =~ ^[[:alnum:]_.-]+$ ]]; then
+        virtualization="unknown"
+        return 0
+    fi
+
+    virtualization_name=$(format_virtualization_name "$virtualization")
+
+    if [[ $virtualization == "wsl" ]]; then
+        virtualization_kind="container"
+        system_type_text="Linux environment (${virtualization_name})"
+    elif systemd-detect-virt --container --quiet >/dev/null 2>&1; then
+        virtualization_kind="container"
+        system_type_text="Container (${virtualization_name})"
+    elif systemd-detect-virt --vm --quiet >/dev/null 2>&1; then
+        virtualization_kind="vm"
+        system_type_text="Virtual machine (${virtualization_name})"
+    else
+        virtualization_kind="virtualized"
+        system_type_text="Virtualized environment (${virtualization_name})"
+    fi
+}
+
 collect_uptime() {
     local index
     local uptime_days
@@ -166,6 +278,7 @@ collect_uptime() {
 }
 
 collect_cpu_info() {
+    local available_cpus=""
     local core_word
     local cpu_model=""
     local key
@@ -174,10 +287,8 @@ collect_cpu_info() {
     local thread_word
     local topology=""
     local value
-    local virtual_cpus=""
 
     cpu_text="unavailable"
-    virtualization="unknown"
 
     if [[ -r /proc/cpuinfo ]]; then
         while IFS=: read -r key value; do
@@ -207,16 +318,17 @@ collect_cpu_info() {
 
     cpu_model=${cpu_model:-unknown}
 
-    if command -v systemd-detect-virt >/dev/null 2>&1; then
-        if ! virtualization=$(systemd-detect-virt 2>/dev/null); then
-            virtualization="none"
-        elif [[ -z $virtualization ]]; then
-            virtualization="unknown"
-        fi
+    if command -v nproc >/dev/null 2>&1; then
+        available_cpus=$(nproc 2>/dev/null)
     fi
 
-    case $virtualization in
-        none)
+    if [[ ! $available_cpus =~ ^[0-9]+$ ]] ||
+        ((available_cpus == 0)); then
+        available_cpus=""
+    fi
+
+    case ${virtualization_kind:-unknown} in
+        physical)
             if command -v lscpu >/dev/null 2>&1 &&
                 command -v awk >/dev/null 2>&1; then
                 topology=$(
@@ -242,11 +354,7 @@ collect_cpu_info() {
 
             if [[ ! $logical_cpus =~ ^[0-9]+$ ]] ||
                 ((logical_cpus == 0)); then
-                logical_cpus=""
-
-                if command -v nproc >/dev/null 2>&1; then
-                    logical_cpus=$(nproc 2>/dev/null)
-                fi
+                logical_cpus=$available_cpus
             fi
 
             if [[ ! $logical_cpus =~ ^[0-9]+$ ]] ||
@@ -275,33 +383,23 @@ collect_cpu_info() {
                 cpu_text=$cpu_model
             fi
             ;;
-        unknown)
-            if command -v nproc >/dev/null 2>&1; then
-                virtual_cpus=$(nproc 2>/dev/null)
-            fi
-
-            if [[ $virtual_cpus =~ ^[0-9]+$ ]] &&
-                ((virtual_cpus > 0)); then
-                if ((virtual_cpus == 1)); then
-                    cpu_text="${cpu_model} · ${virtual_cpus} CPU"
+        vm)
+            if [[ -n $available_cpus ]]; then
+                if ((available_cpus == 1)); then
+                    cpu_text="${cpu_model} · ${available_cpus} vCPU"
                 else
-                    cpu_text="${cpu_model} · ${virtual_cpus} CPUs"
+                    cpu_text="${cpu_model} · ${available_cpus} vCPUs"
                 fi
             elif [[ $cpu_model != "unknown" ]]; then
                 cpu_text=$cpu_model
             fi
             ;;
         *)
-            if command -v nproc >/dev/null 2>&1; then
-                virtual_cpus=$(nproc 2>/dev/null)
-            fi
-
-            if [[ $virtual_cpus =~ ^[0-9]+$ ]] &&
-                ((virtual_cpus > 0)); then
-                if ((virtual_cpus == 1)); then
-                    cpu_text="${cpu_model} · ${virtual_cpus} vCPU"
+            if [[ -n $available_cpus ]]; then
+                if ((available_cpus == 1)); then
+                    cpu_text="${cpu_model} · ${available_cpus} CPU"
                 else
-                    cpu_text="${cpu_model} · ${virtual_cpus} vCPUs"
+                    cpu_text="${cpu_model} · ${available_cpus} CPUs"
                 fi
             elif [[ $cpu_model != "unknown" ]]; then
                 cpu_text=$cpu_model
@@ -564,12 +662,17 @@ collect_activity_info() {
     fi
 }
 
-print_motd() {
-    printf 'Welcome to %s running %s\n\n' "$hostname" "$os_text"
+print_server_info() {
+    if [[ $output_mode == "manual" ]]; then
+        printf '%s running %s\n\n' "$hostname" "$os_text"
+    else
+        printf 'Welcome to %s running %s\n\n' "$hostname" "$os_text"
+    fi
 
     printf 'System information as of %s\n\n' "$timestamp"
 
     print_field "Kernel:" "${kernel}, ${architecture}"
+    print_field "System type:" "$system_type_text"
 
     printf '\n'
 
@@ -594,7 +697,22 @@ print_motd() {
 }
 
 main() {
+    local argument_status
+
+    parse_arguments "$@"
+    argument_status=$?
+
+    if ((argument_status != 0)); then
+        return "$argument_status"
+    fi
+
+    if [[ $output_mode == "help" ]]; then
+        print_usage
+        return 0
+    fi
+
     collect_system_info
+    collect_virtualization_info
     collect_uptime
     collect_cpu_info
     collect_load_info
@@ -602,7 +720,7 @@ main() {
     collect_disk_info
     collect_network_info
     collect_activity_info
-    print_motd
+    print_server_info
 }
 
 main "$@"
