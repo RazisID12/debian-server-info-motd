@@ -5,6 +5,42 @@ Lightweight dynamic system information MOTD for Debian 13 servers.
 It displays a compact system summary on SSH and local console logins. The same
 information is also available at any time through the `server-info` command.
 
+> **Target platform:** Debian 13 (trixie).
+
+## Features
+
+- Debian version and codename, kernel, and architecture
+- Physical machine, virtual machine, or container detection
+- Human-readable uptime
+- CPU model, topology, and current utilization
+- Load average, memory, swap, and root filesystem usage
+- Independent IPv4 and IPv6 interface detection
+- Multiple global addresses per selected interface
+- Process and login session counts
+- Graceful fallback when optional system information is unavailable
+- Manual output without the welcome message through `server-info`
+- Optional management of OpenSSH's native `Last login` notice
+- Managed installation, updates, repair, rollback, and uninstallation
+
+## Compatibility
+
+| Area | Target or verified environment |
+| --- | --- |
+| Target | Debian 13 (trixie) |
+| Runtime — KVM | Debian 13 on KVM virtual machines |
+| Login surfaces | Interactive OpenSSH and local console sessions using `/etc/update-motd.d` |
+| Manual command | On-demand output through `server-info` |
+| Installer lifecycle | Install, update, repair, rollback, and uninstall |
+| OpenSSH integration | Optional managed `PrintLastLog` drop-in for Debian `ssh.service` |
+
+The core MOTD requires `wget`, `sha256sum`, `run-parts`, `sleep`, and `cmp`.
+Network information uses the `ip` command from `iproute2`; the remaining system
+summary still renders when it is unavailable.
+
+The installer requires root privileges, directly or through `sudo`. Optional
+management of the native `Last login` notice requires `openssh-server` and an
+active Debian `ssh.service`; the MOTD itself does not require OpenSSH.
+
 ## Example output
 
 ```text
@@ -28,43 +64,10 @@ System information as of 02.09.2026 15:11 UTC
   Login sessions:          2
 ```
 
-Both the interactive MOTD output and the manual `server-info` command end with
-one blank line. The manual command also begins with one blank line so its report
-is visually separated from the surrounding shell prompt. During an interactive
-SSH login, the trailing line separates the summary from OpenSSH's native
-`Last login` notice when `PrintLastLog` is enabled. The project does not read or
-print login history itself.
-
-## Features
-
-- Debian version and codename, kernel, and architecture
-- Physical machine, virtual machine, or container detection
-- Human-readable uptime
-- CPU model, topology, and current utilization
-- Load average, memory, swap, and root filesystem usage
-- Independent IPv4 and IPv6 interface detection
-- Multiple global addresses per selected interface
-- Process and login session counts
-- Graceful fallback when optional system information is unavailable
-- Manual output without the welcome message through `server-info`
-- Optional management of OpenSSH's native `Last login` notice
-- Managed installation, updates, repair, rollback, and uninstallation
-
-## Requirements
-
-- Debian 13
-- Root privileges, directly or through `sudo`
-- `wget`, `sha256sum`, `run-parts`, `sleep`, and `cmp`
-
-Network information requires the `ip` command provided by `iproute2`. If it is
-unavailable, the rest of the system summary is still displayed.
-
-Managing the native `Last login` notice requires `openssh-server` and an active
-Debian `ssh.service`. The MOTD itself does not require OpenSSH.
-
 ## Install
 
-The recommended installation uses the current verified release, **v0.3.1**:
+The recommended installation uses the current verified release,
+[`v0.3.1`](https://github.com/RzandAl/debian-server-info-motd/releases/tag/v0.3.1):
 
 ```bash
 wget --quiet --https-only -O- \
@@ -73,11 +76,14 @@ sudo bash -s -- --source-ref v0.3.1
 ```
 
 Select **Install** from the interactive menu. When already logged in as root,
-omit `sudo`.
+omit `sudo`. Open a new SSH or local console session after installation to see
+the MOTD.
 
-Open a new SSH or local console session after installation to see the MOTD.
+The installer downloads every managed file from the same Git reference,
+verifies its checksum and Bash syntax, and attempts automatic rollback if a
+managed operation fails.
 
-## Manual usage
+## Quick use
 
 Show the same system information without the welcome message:
 
@@ -91,45 +97,39 @@ Show command help:
 server-info --help
 ```
 
-## Update or repair
+Run the installer again to update, repair, configure OpenSSH's native
+`Last login` notice, or uninstall the project.
 
-Run the installer for the release you want to use and select **Update**. To stay
-on v0.3.1:
+## Documentation
+
+- [Installer, source references, verification, managed paths, and rollback](docs/INSTALLER.md)
+- [Continuous integration checks](.github/workflows/ci.yml)
+
+## Tests and validation
+
+The repository CI validates executable modes, project versioning, installer
+arguments, Bash syntax, checksum consistency, output formatting, OpenSSH
+`Last login` ownership and rollback behavior, and ShellCheck results.
+
+Run the repository-owned checks from the project root:
 
 ```bash
-wget --quiet --https-only -O- \
-https://raw.githubusercontent.com/RzandAl/debian-server-info-motd/v0.3.1/install.sh |
-sudo bash -s -- --source-ref v0.3.1
+bash -n \
+    install.sh \
+    etc/update-motd.d/10-server-info \
+    usr/local/bin/server-info
+
+sha256sum -c SHA256SUMS
+sudo tests/test-last-login-management.sh
 ```
 
-If a managed executable is missing or modified, the installer reports it and
-offers to repair the installation. If the installed files, version, and source
-reference are already current and valid, they are not rewritten.
+Interactive MOTD and manual-command behavior were also validated on Debian 13
+KVM servers.
 
-## OpenSSH `Last login`
+## Maintainers
 
-The project leaves OpenSSH configuration unchanged by default. If
-`PrintLastLog` is effectively disabled during a new installation, the installer
-offers to enable it explicitly; the default answer is **No**.
-
-For an existing installation, run the installer and select **Configure OpenSSH
-Last login**. The project uses a separately managed OpenSSH drop-in, validates
-the configuration before applying it, and can stop managing the setting again
-without forcing `PrintLastLog` off. A modified drop-in is preserved; otherwise
-the managed drop-in is removed and OpenSSH resumes using its underlying
-configuration. The same cleanup happens during uninstallation.
-
-## Uninstall
-
-Run the installer for the installed release and select **Uninstall**. After
-confirmation, it removes the managed files and restores the MOTD configuration
-saved during installation.
-
-## Advanced installer usage
-
-Installation from `main` or another Git ref, `--debug`, `--source-ref`, installed
-paths, verification details, state handling, and rollback behavior are documented
-in [docs/INSTALLER.md](docs/INSTALLER.md).
+Developed and tested together by [AmleyID](https://github.com/AmleyID) and
+[RazisID12](https://github.com/RazisID12).
 
 ## License
 
